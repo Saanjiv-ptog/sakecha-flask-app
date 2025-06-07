@@ -1,37 +1,34 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, make_response # make_response added here
+import os # Make sure this is at the top of your app.py
+
+from flask import Flask, render_template, request, redirect, url_for, flash, make_response, current_app
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timedelta
-import os
-import pdfkit # NEW: Import pdfkit
-from calendar import monthrange # NEW: Import monthrange for PDF generation logic
+import pdfkit
+from calendar import monthrange
+from sqlalchemy import inspect # Import inspect for checking table existence
 
 
 # For Flask-Bootstrap
 from flask_bootstrap import Bootstrap
 
-# For PDF generation (Note: pdfkit and wkhtmltopdf need external setup)
-# import pdfkit # This was already commented out, but we need it active now!
-
-
 # --- Flask App Configuration ---
 app = Flask(__name__)
 
-# This generates a strong, random key automatically.
-app.config['SECRET_KEY'] = os.urandom(24).hex()
+# Get SECRET_KEY from environment variable, fallback to a local-only key for local development
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your_super_secret_key_for_local_development_ONLY')
 
-# --- IMPORTANT DATABASE CONFIGURATION ---
-# Using your PostgreSQL URI
-app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:SKN04JB%@localhost/sakecha_d'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+# Get database URI from environment variable, fallback to SQLite for local development
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///sakecha.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False # Recommended to set to False for Flask-SQLAlchemy
 
 # --- Initialize Extensions ---
 db = SQLAlchemy(app)
 login_manager = LoginManager()
 login_manager.init_app(app)
-login_manager.login_view = 'login' # Assuming 'login' is the endpoint name of your login route
-bootstrap = Bootstrap(app) # Initialize Flask-Bootstrap
+login_manager.login_view = 'login'
+bootstrap = Bootstrap(app)
 
 # --- NEW: PDFKit Configuration ---
 # IMPORTANT: Adjust this path to where wkhtmltopdf.exe is located on your system.
@@ -45,7 +42,7 @@ if WKHTMLTOPDF_PATH is None:
     elif os.name == 'posix': # Linux/macOS
         WKHTMLTOPDF_PATH = '/usr/local/bin/wkhtmltopdf'
         if not os.path.exists(WKHTMLTOPDF_PATH):
-             WKHTMLTOPDF_PATH = '/usr/bin/wkhtmltopdf'
+            WKHTMLTOPDF_PATH = '/usr/bin/wkhtmltopdf'
 
 if WKHTMLTOPDF_PATH and not os.path.exists(WKHTMLTOPDF_PATH):
     print(f"WARNING: wkhtmltopdf not found at '{WKHTMLTOPDF_PATH}'. PDF generation might fail.")
@@ -61,34 +58,26 @@ else:
         config = None # Let pdfkit try to find it in PATH
 # --- END NEW: PDFKit Configuration ---
 
-
-# --- User Loader for Flask-Login ---
-@login_manager.user_loader
-def load_user(user_id):
-    # user_id comes as a string, so convert it to an integer if your user IDs are integers
-    return Franchisee.query.get(int(user_id))
-
 # --- Franchisee Model Definition ---
+# Moved here to ensure it's defined before it's used in load_user or other parts of the app
 class Franchisee(db.Model, UserMixin):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(64), unique=True, nullable=False)
-    password_hash = db.Column(db.String(128), nullable=False) # Made nullable=False
-    name = db.Column(db.String(120), nullable=False, default='Unnamed Franchisee') # Added name
-    location = db.Column(db.String(120), nullable=False, default='Unknown Location') # Added location
-    is_admin = db.Column(db.Boolean, default=False) # Added is_admin
+    password_hash = db.Column(db.String(255), nullable=False)
+    name = db.Column(db.String(120), nullable=False, default='Unnamed Franchisee')
+    location = db.Column(db.String(120), nullable=False, default='Unknown Location')
+    is_admin = db.Column(db.Boolean, default=False)
 
     # Relationships for the new models
     daily_reports = db.relationship('DailyReport', backref='franchisee', lazy=True, cascade="all, delete-orphan")
     ingredient_reorders = db.relationship('IngredientReorder', backref='franchisee', lazy=True, cascade="all, delete-orphan")
-    # Relationship for TeamAttendance, linking directly to Franchisee as well
     team_attendances = db.relationship('TeamAttendance', backref='franchisee_member', lazy=True, cascade="all, delete-orphan")
-
 
     def get_id(self):
         return str(self.id)
 
     def set_password(self, password):
-        self.password_hash = generate_password_hash(password)
+        self.password_hash = generate_password_hash(password, method='pbkdf2:sha256') # Ensure hashing method is specified
 
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
@@ -102,37 +91,23 @@ class DailyReport(db.Model):
     franchisee_id = db.Column(db.Integer, db.ForeignKey('franchisee.id'), nullable=False)
     report_date = db.Column(db.Date, nullable=False, default=datetime.utcnow)
     total_sales = db.Column(db.Float, nullable=False)
-    # The original instruction for PDF generation assumed these columns exist:
-    cash_collected = db.Column(db.Float, nullable=False, default=0.0) # Added for PDF report
-    banked_in = db.Column(db.Float, nullable=False, default=0.0)      # Added for PDF report
-    expenses = db.Column(db.Float, nullable=False, default=0.0)       # Added for PDF report
-    description = db.Column(db.Text, nullable=True) # Used 'notes' before, but 'description' is used in PDF template
-    notes = db.Column(db.Text, nullable=True) # Keeping 'notes' for compatibility if you use it elsewhere
-
-    # Relationship to TeamAttendance (This already exists)
-    # attendance = db.relationship('TeamAttendance', backref='daily_report', lazy=True, cascade="all, delete-orphan")
-    # Clarification: DailyReport.attendance is a one-to-many relationship.
-    # The PDF template's 'team_attendance' comes from a separate query,
-    # but if you intend to link a single daily report to multiple attendance entries,
-    # the relationship below (using backref for TeamAttendance) is the right way.
-    # If a DailyReport has only ONE TeamAttendance entry, you might define it differently.
-    # For now, let's ensure TeamAttendance model has the attendance_date as seen in the PDF generation code.
+    cash_collected = db.Column(db.Float, nullable=False, default=0.0)
+    banked_in = db.Column(db.Float, nullable=False, default=0.0)
+    expenses = db.Column(db.Float, nullable=False, default=0.0)
+    description = db.Column(db.Text, nullable=True)
+    notes = db.Column(db.Text, nullable=True)
 
     def __repr__(self):
         return f'<DailyReport {self.report_date} - {self.total_sales}>'
 
 class TeamAttendance(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    # daily_report_id = db.Column(db.Integer, db.ForeignKey('daily_report.id'), nullable=False) # Keep this if a report is mandatory for attendance
-    # Linking directly to franchisee for broader context, as in previous discussion
     franchisee_id = db.Column(db.Integer, db.ForeignKey('franchisee.id'), nullable=False)
-    attendance_date = db.Column(db.Date, nullable=False, default=datetime.utcnow) # Added for PDF report filtering
+    attendance_date = db.Column(db.Date, nullable=False, default=datetime.utcnow)
     team_member_name = db.Column(db.String(100), nullable=False)
     is_present = db.Column(db.Boolean, nullable=False)
-    remarks = db.Column(db.Text, nullable=True) # Added for PDF report
-    # If DailyReport.attendance backref is used, you can access attendance.daily_report
-    daily_report_id = db.Column(db.Integer, db.ForeignKey('daily_report.id'), nullable=True) # Make nullable=True if attendance can exist without a direct daily report link, or ensure it's always linked.
-    # Add backref for daily_report
+    remarks = db.Column(db.Text, nullable=True)
+    daily_report_id = db.Column(db.Integer, db.ForeignKey('daily_report.id'), nullable=True)
     daily_report = db.relationship('DailyReport', backref=db.backref('attendances', lazy=True, cascade="all, delete-orphan"))
 
     def __repr__(self):
@@ -144,11 +119,16 @@ class IngredientReorder(db.Model):
     request_date = db.Column(db.Date, nullable=False, default=datetime.utcnow)
     ingredient_name = db.Column(db.String(100), nullable=False)
     quantity_needed = db.Column(db.Integer, nullable=False)
-    status = db.Column(db.String(50), nullable=False, default='Pending') # e.g., 'Pending', 'Approved', 'Rejected'
+    status = db.Column(db.String(50), nullable=False, default='Pending')
 
     def __repr__(self):
         return f'<IngredientReorder {self.ingredient_name} - {self.quantity_needed} - {self.status}>'
 
+# --- User Loader for Flask-Login ---
+@login_manager.user_loader
+def load_user(user_id):
+    # user_id comes as a string, so convert it to an integer if your user IDs are integers
+    return Franchisee.query.get(int(user_id))
 
 # --- Routes ---
 @app.route('/')
@@ -163,8 +143,8 @@ def register():
     if request.method == 'POST':
         username = request.form.get('username')
         password = request.form.get('password')
-        name = request.form.get('name', 'New Franchisee') # Get name from form or set default
-        location = request.form.get('location', 'Unspecified') # Get location from form or set default
+        name = request.form.get('name', 'New Franchisee')
+        location = request.form.get('location', 'Unspecified')
 
 
         if not username or not password:
@@ -176,7 +156,7 @@ def register():
             flash('Username already exists. Please choose a different one.', 'warning')
             return redirect(url_for('register'))
 
-        new_franchisee = Franchisee(username=username, name=name, location=location) # Pass name and location
+        new_franchisee = Franchisee(username=username, name=name, location=location)
         new_franchisee.set_password(password)
 
         try:
@@ -206,10 +186,9 @@ def login():
             login_user(franchisee)
             flash('Logged in successfully!', 'success')
             next_page = request.args.get('next')
-            # Redirect to admin dashboard if admin, otherwise to home/user dashboard
             if franchisee.is_admin:
                 return redirect(url_for('admin_dashboard'))
-            return redirect(next_page or url_for('home')) # Redirect to home for regular users
+            return redirect(next_page or url_for('home'))
         else:
             flash('Invalid username or password.', 'danger')
 
@@ -220,20 +199,20 @@ def login():
 def logout():
     logout_user()
     flash('You have been logged out.', 'info')
-    return redirect(url_for('home')) # Redirect to home after logout
+    return redirect(url_for('home'))
 
 # --- Route for Daily Sales Report Submission ---
 @app.route('/submit_daily_report', methods=['GET', 'POST'])
-@login_required # Requires user to be logged in
+@login_required
 def submit_daily_report():
     if request.method == 'POST':
         try:
             report_date_str = request.form.get('report_date')
             total_sales = float(request.form.get('total_sales'))
-            cash_collected = float(request.form.get('cash_collected', 0.0)) # Added
-            banked_in = float(request.form.get('banked_in', 0.0))       # Added
-            expenses = float(request.form.get('expenses', 0.0))         # Added
-            description = request.form.get('description', None)         # Added (was 'notes')
+            cash_collected = float(request.form.get('cash_collected', 0.0))
+            banked_in = float(request.form.get('banked_in', 0.0))
+            expenses = float(request.form.get('expenses', 0.0))
+            description = request.form.get('description', None)
 
             # Convert date string to date object
             report_date = datetime.strptime(report_date_str, '%Y-%m-%d').date()
@@ -252,11 +231,11 @@ def submit_daily_report():
                 franchisee_id=current_user.id,
                 report_date=report_date,
                 total_sales=total_sales,
-                cash_collected=cash_collected, # Added
-                banked_in=banked_in,       # Added
-                expenses=expenses,         # Added
-                description=description,   # Added
-                notes=description          # Keeping notes for now, but description is used in PDF template
+                cash_collected=cash_collected,
+                banked_in=banked_in,
+                expenses=expenses,
+                description=description,
+                notes=description
             )
             db.session.add(new_report)
             db.session.commit()
@@ -288,7 +267,7 @@ def add_attendance():
         daily_report_id = request.form.get('daily_report_id', type=int)
         team_member_name = request.form.get('team_member_name')
         is_present = 'is_present' in request.form
-        remarks = request.form.get('remarks', None) # Added for PDF
+        remarks = request.form.get('remarks', None)
 
         report_to_link = DailyReport.query.get(daily_report_id)
 
@@ -302,11 +281,11 @@ def add_attendance():
 
         new_attendance = TeamAttendance(
             daily_report_id=report_to_link.id,
-            franchisee_id=current_user.id, # Link attendance directly to franchisee
-            attendance_date=report_to_link.report_date, # Use the report date for attendance
+            franchisee_id=current_user.id,
+            attendance_date=report_to_link.report_date,
             team_member_name=team_member_name,
             is_present=is_present,
-            remarks=remarks # Added
+            remarks=remarks
         )
         db.session.add(new_attendance)
         db.session.commit()
@@ -330,154 +309,385 @@ def request_ingredients():
             quantity_needed = int(request.form.get('quantity_needed'))
 
             if not ingredient_name or quantity_needed <= 0:
-                flash('Ingredient name and a positive quantity are required.', 'danger')
+                flash('Ingredient name and a positive quantity are required!', 'danger')
                 return redirect(url_for('request_ingredients'))
 
             new_reorder = IngredientReorder(
                 franchisee_id=current_user.id,
                 ingredient_name=ingredient_name,
                 quantity_needed=quantity_needed,
-                status='Pending' # Default status
+                request_date=datetime.utcnow().date(),
+                status='Pending'
             )
             db.session.add(new_reorder)
             db.session.commit()
             flash('Ingredient reorder request submitted successfully!', 'success')
-            return redirect(url_for('request_ingredients'))
+            return redirect(url_for('view_reorder_history'))
+
         except ValueError:
-            flash('Invalid quantity. Please enter a whole number.', 'danger')
+            flash('Quantity needed must be a valid number.', 'danger')
         except Exception as e:
             flash(f'An error occurred: {e}', 'danger')
         return redirect(url_for('request_ingredients'))
     return render_template('request_ingredients.html', title='Request Ingredients')
 
+# --- Route for Viewing Reorder History (for Franchisee) ---
+@app.route('/reorder_history')
+@login_required
+def view_reorder_history():
+    reorders = IngredientReorder.query.filter_by(franchisee_id=current_user.id).order_by(IngredientReorder.request_date.desc()).all()
+    return render_template('reorder_history.html', title='Reorder History', reorders=reorders)
 
-# Admin Dashboard Route
+# --- Route for Viewing Daily Reports (for Franchisee) ---
+@app.route('/my_daily_reports')
+@login_required
+def my_daily_reports():
+    reports = DailyReport.query.filter_by(franchisee_id=current_user.id).order_by(DailyReport.report_date.desc()).all()
+    return render_template('my_daily_reports.html', title='My Daily Reports', reports=reports)
+
+# --- Admin Dashboard and Functionality ---
 @app.route('/admin_dashboard')
 @login_required
 def admin_dashboard():
     if not current_user.is_admin:
-        flash('You do not have permission to access the admin dashboard.', 'danger')
-        return redirect(url_for('home')) # Redirect to a non-admin dashboard or home
+        flash('Unauthorized access.', 'danger')
+        return redirect(url_for('home'))
 
+    # Fetch all franchisees
+    franchisees = Franchisee.query.all()
+
+    # Fetch all daily reports for admin overview
     all_daily_reports = DailyReport.query.order_by(DailyReport.report_date.desc()).all()
-    all_reorder_requests = IngredientReorder.query.order_by(IngredientReorder.request_date.desc()).all()
 
-    # Top Booths (Total sales for the last 7 days)
-    seven_days_ago = datetime.now() - timedelta(days=7)
-    top_booths_query = db.session.query(
-        Franchisee.name,
-        db.func.sum(DailyReport.total_sales).label('total_sales')
-    ).join(DailyReport).filter(DailyReport.report_date >= seven_days_ago).group_by(Franchisee.name).order_by(db.func.sum(DailyReport.total_sales).desc()).limit(5).all()
-    top_booths = [{'name': booth[0], 'total_sales': booth[1]} for booth in top_booths_query]
+    # Fetch all ingredient reorders
+    all_reorders = IngredientReorder.query.order_by(IngredientReorder.request_date.desc()).all()
 
-    # Total sales for current month
-    current_month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    total_sales_current_month = db.session.query(db.func.sum(DailyReport.total_sales)).filter(
-        DailyReport.report_date >= current_month_start
-    ).scalar() or 0.0
+    # Fetch all team attendances
+    all_attendances = TeamAttendance.query.order_by(TeamAttendance.attendance_date.desc()).all()
 
-    return render_template('admin_dashboard.html',
-                           daily_reports=all_daily_reports,
-                           reorder_requests=all_reorder_requests,
-                           top_booths=top_booths,
-                           total_sales_current_month=total_sales_current_month,
-                           now=datetime.now) # This is the addition
 
-# --- NEW: PDF Generation Route ---
-@app.route('/generate_monthly_report_pdf', methods=['POST'])
+    return render_template(
+        'admin_dashboard.html',
+        title='Admin Dashboard',
+        franchisees=franchisees,
+        all_daily_reports=all_daily_reports,
+        all_reorders=all_reorders,
+        all_attendances=all_attendances
+    )
+
+@app.route('/admin/manage_franchisees')
 @login_required
-def generate_monthly_report_pdf():
+def manage_franchisees():
     if not current_user.is_admin:
-        flash('You do not have permission to generate PDF reports.', 'danger')
-        return redirect(url_for('dashboard')) # Ensure 'dashboard' is a valid route for non-admins, or change to 'home'
+        flash('Unauthorized access.', 'danger')
+        return redirect(url_for('home'))
+    franchisees = Franchisee.query.all()
+    return render_template('manage_franchisees.html', title='Manage Franchisees', franchisees=franchisees)
 
-    selected_month = request.form.get('month')
-    selected_year = request.form.get('year')
+@app.route('/admin/add_franchisee', methods=['GET', 'POST'])
+@login_required
+def add_franchisee():
+    if not current_user.is_admin:
+        flash('Unauthorized access.', 'danger')
+        return redirect(url_for('home'))
 
-    if not selected_month or not selected_year:
-        flash('Please select a month and year.', 'danger')
-        return redirect(url_for('admin_dashboard'))
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        name = request.form.get('name')
+        location = request.form.get('location')
+        is_admin = 'is_admin' in request.form
+
+        if not username or not password:
+            flash('Username and password are required!', 'danger')
+            return redirect(url_for('add_franchisee'))
+
+        existing_user = Franchisee.query.filter_by(username=username).first()
+        if existing_user:
+            flash('Username already exists.', 'warning')
+            return redirect(url_for('add_franchisee'))
+
+        new_franchisee = Franchisee(username=username, name=name, location=location, is_admin=is_admin)
+        new_franchisee.set_password(password)
+        db.session.add(new_franchisee)
+        db.session.commit()
+        flash('Franchisee added successfully!', 'success')
+        return redirect(url_for('manage_franchisees'))
+    return render_template('add_franchisee.html', title='Add Franchisee')
+
+@app.route('/admin/edit_franchisee/<int:id>', methods=['GET', 'POST'])
+@login_required
+def edit_franchisee(id):
+    if not current_user.is_admin:
+        flash('Unauthorized access.', 'danger')
+        return redirect(url_for('home'))
+
+    # Fixed typo: Franchisee.query.get_or_404
+    franchisee = Franchisee.query.get_or_404(id)
+    if request.method == 'POST':
+        franchisee.username = request.form.get('username')
+        franchisee.name = request.form.get('name')
+        franchisee.location = request.form.get('location')
+        franchisee.is_admin = 'is_admin' in request.form
+        new_password = request.form.get('password')
+        if new_password:
+            franchisee.set_password(new_password)
+        db.session.commit()
+        flash('Franchisee updated successfully!', 'success')
+        return redirect(url_for('manage_franchisees'))
+    return render_template('edit_franchisee.html', title='Edit Franchisee', franchisee=franchisee)
+
+@app.route('/admin/delete_franchisee/<int:id>', methods=['POST'])
+@login_required
+def delete_franchisee(id):
+    if not current_user.is_admin:
+        flash('Unauthorized access.', 'danger')
+        return redirect(url_for('home'))
+    franchisee = Franchisee.query.get_or_404(id)
+    db.session.delete(franchisee)
+    db.session.commit()
+    flash('Franchisee deleted successfully!', 'success')
+    return redirect(url_for('manage_franchisees'))
+
+@app.route('/admin/daily_reports')
+@login_required
+def admin_daily_reports():
+    if not current_user.is_admin:
+        flash('Unauthorized access.', 'danger')
+        return redirect(url_for('home'))
+    reports = DailyReport.query.order_by(DailyReport.report_date.desc()).all()
+    return render_template('admin_daily_reports.html', title='All Daily Reports', reports=reports)
+
+@app.route('/admin/edit_daily_report/<int:id>', methods=['GET', 'POST'])
+@login_required
+def edit_daily_report(id):
+    if not current_user.is_admin:
+        flash('Unauthorized access.', 'danger')
+        return redirect(url_for('home'))
+
+    report = DailyReport.query.get_or_404(id)
+    if request.method == 'POST':
+        report.report_date = datetime.strptime(request.form.get('report_date'), '%Y-%m-%d').date()
+        report.total_sales = float(request.form.get('total_sales'))
+        report.cash_collected = float(request.form.get('cash_collected'))
+        report.banked_in = float(request.form.get('banked_in'))
+        report.expenses = float(request.form.get('expenses'))
+        report.description = request.form.get('description')
+        report.notes = request.form.get('notes')
+        db.session.commit()
+        flash('Daily report updated successfully!', 'success')
+        return redirect(url_for('admin_daily_reports'))
+    return render_template('edit_daily_report.html', title='Edit Daily Report', report=report)
+
+@app.route('/admin/delete_daily_report/<int:id>', methods=['POST'])
+@login_required
+def delete_daily_report(id):
+    if not current_user.is_admin:
+        flash('Unauthorized access.', 'danger')
+        return redirect(url_for('home'))
+    report = DailyReport.query.get_or_404(id)
+    db.session.delete(report)
+    db.session.commit()
+    flash('Daily report deleted successfully!', 'success')
+    return redirect(url_for('admin_daily_reports'))
+
+
+@app.route('/admin/ingredient_reorders')
+@login_required
+def admin_ingredient_reorders():
+    if not current_user.is_admin:
+        flash('Unauthorized access.', 'danger')
+        return redirect(url_for('home'))
+    reorders = IngredientReorder.query.order_by(IngredientReorder.request_date.desc()).all()
+    return render_template('admin_ingredient_reorders.html', title='Ingredient Reorders', reorders=reorders)
+
+@app.route('/admin/update_reorder_status/<int:id>', methods=['POST'])
+@login_required
+def update_reorder_status(id):
+    if not current_user.is_admin:
+        flash('Unauthorized access.', 'danger')
+        return redirect(url_for('home'))
+    reorder = IngredientReorder.query.get_or_404(id)
+    new_status = request.form.get('status')
+    if new_status in ['Pending', 'Processing', 'Completed', 'Cancelled']:
+        reorder.status = new_status
+        db.session.commit()
+        flash(f'Reorder {reorder.id} status updated to {new_status}.', 'success')
+    else:
+        flash('Invalid status.', 'danger')
+    return redirect(url_for('admin_ingredient_reorders'))
+
+@app.route('/admin/delete_reorder/<int:id>', methods=['POST'])
+@login_required
+def delete_reorder(id):
+    if not current_user.is_admin:
+        flash('Unauthorized access.', 'danger')
+        return redirect(url_for('home'))
+    reorder = IngredientReorder.query.get_or_404(id)
+    db.session.delete(reorder)
+    db.session.commit()
+    flash('Ingredient reorder deleted successfully!', 'success')
+    return redirect(url_for('admin_ingredient_reorders'))
+
+@app.route('/admin/team_attendances')
+@login_required
+def admin_team_attendances():
+    if not current_user.is_admin:
+        flash('Unauthorized access.', 'danger')
+        return redirect(url_for('home'))
+    attendances = TeamAttendance.query.order_by(TeamAttendance.attendance_date.desc()).all()
+    return render_template('admin_team_attendances.html', title='All Team Attendances', attendances=attendances)
+
+@app.route('/admin/edit_attendance/<int:id>', methods=['GET', 'POST'])
+@login_required
+def edit_attendance(id):
+    if not current_user.is_admin:
+        flash('Unauthorized access.', 'danger')
+        return redirect(url_for('home'))
+
+    attendance = TeamAttendance.query.get_or_404(id)
+    if request.method == 'POST':
+        attendance.team_member_name = request.form.get('team_member_name')
+        attendance.is_present = 'is_present' in request.form
+        attendance.remarks = request.form.get('remarks')
+        db.session.commit()
+        flash('Attendance record updated successfully!', 'success')
+        return redirect(url_for('admin_team_attendances'))
+    return render_template('edit_attendance.html', title='Edit Attendance', attendance=attendance)
+
+@app.route('/admin/delete_attendance/<int:id>', methods=['POST'])
+@login_required
+def delete_attendance(id):
+    if not current_user.is_admin:
+        flash('Unauthorized access.', 'danger')
+        return redirect(url_for('home'))
+    attendance = TeamAttendance.query.get_or_404(id)
+    db.session.delete(attendance)
+    db.session.commit()
+    flash('Attendance record deleted successfully!', 'success')
+    return redirect(url_for('admin_team_attendances'))
+
+# --- PDF Generation Routes ---
+
+@app.route('/admin/daily_report_pdf/<int:report_id>')
+@login_required
+def daily_report_pdf(report_id):
+    if not current_user.is_admin:
+        flash('Unauthorized access.', 'danger')
+        return redirect(url_for('home'))
+
+    report = DailyReport.query.get_or_404(report_id)
+    franchisee = Franchisee.query.get_or_404(report.franchisee_id)
+    attendances = TeamAttendance.query.filter_by(daily_report_id=report_id).all()
+
+    # Render HTML template to a string
+    rendered_html = render_template('daily_report_pdf_template.html',
+                                    report=report,
+                                    franchisee=franchisee,
+                                    attendances=attendances,
+                                    current_date=datetime.now().strftime("%Y-%m-%d %H:%M"))
+
+    if config is None:
+        flash("PDF generation is not configured. wkhtmltopdf not found.", "danger")
+        return redirect(url_for('admin_daily_reports'))
 
     try:
-        month_int = int(selected_month)
-        year_int = int(selected_year)
-    except ValueError:
-        flash('Invalid month or year.', 'danger')
-        return redirect(url_for('admin_dashboard'))
-
-    # Calculate start and end dates for the selected month
-    num_days = monthrange(year_int, month_int)[1]
-    start_date = datetime(year_int, month_int, 1).date()
-    end_date = datetime(year_int, month_int, num_days).date()
-
-    # Fetch data for the selected month
-    # Ensure Franchisee.name is correctly joined or accessed for ordering
-    monthly_daily_reports = DailyReport.query.filter(
-        DailyReport.report_date >= start_date,
-        DailyReport.report_date <= end_date
-    ).join(Franchisee).order_by(DailyReport.report_date.asc(), Franchisee.name.asc()).all() # Order by date and franchisee name for better readability
-
-    monthly_team_attendance = TeamAttendance.query.filter(
-        TeamAttendance.attendance_date >= start_date,
-        TeamAttendance.attendance_date <= end_date
-    ).join(Franchisee).order_by(TeamAttendance.attendance_date.asc(), Franchisee.name.asc()).all() # Corrected join and ordering
-
-    # Calculate total sales for the month
-    total_sales_month = sum(report.total_sales for report in monthly_daily_reports)
-
-    # Render HTML template for PDF content
-    html_content = render_template('monthly_report_template.html',
-                                   month=datetime(year_int, month_int, 1).strftime('%B'),
-                                   year=year_int,
-                                   daily_reports=monthly_daily_reports,
-                                   team_attendance=monthly_team_attendance,
-                                   total_sales_month=total_sales_month)
-
-    # Generate PDF
-    try:
-        if config: # Use the configured path if it exists
-            pdf = pdfkit.from_string(html_content, False, configuration=config)
-        else: # Otherwise, let pdfkit try to find it in PATH
-            pdf = pdfkit.from_string(html_content, False)
+        # Generate PDF from HTML string
+        pdf = pdfkit.from_string(rendered_html, False, configuration=config) # False means return PDF as string
 
         response = make_response(pdf)
         response.headers['Content-Type'] = 'application/pdf'
-        response.headers['Content-Disposition'] = f'attachment; filename=Monthly_Report_{selected_month}_{selected_year}.pdf'
+        response.headers['Content-Disposition'] = f'attachment; filename=daily_report_{report.report_date}.pdf'
         return response
     except Exception as e:
-        flash(f'Error generating PDF: {e}', 'danger')
-        app.logger.error(f"PDF generation error: {e}") # Log the error for debugging
+        flash(f"Error generating PDF: {e}. Ensure wkhtmltopdf is correctly installed and configured.", "danger")
+        return redirect(url_for('admin_daily_reports'))
+
+
+@app.route('/admin/monthly_report_pdf')
+@login_required
+def monthly_report_pdf():
+    if not current_user.is_admin:
+        flash('Unauthorized access.', 'danger')
+        return redirect(url_for('home'))
+
+    # Get month and year from request arguments, or default to current month/year
+    year = request.args.get('year', type=int, default=datetime.now().year)
+    month = request.args.get('month', type=int, default=datetime.now().month)
+
+    # Validate month and year
+    if not (1 <= month <= 12) or year < 2000: # Arbitrary sensible year start
+        flash('Invalid month or year.', 'danger')
         return redirect(url_for('admin_dashboard'))
-# --- END NEW: PDF Generation Route ---
 
+    # Calculate start and end dates for the month
+    start_date = datetime(year, month, 1).date()
+    end_date = datetime(year, month, monthrange(year, month)[1]).date()
 
-# --- Main Run Block ---
-if __name__ == '__main__':
-    with app.app_context():
-        # WARNING: This will drop ALL existing tables and recreate them.
-        # All your current data will be lost. Use this for development/initial setup.
-        print("Attempting to drop and recreate database tables...")
-        db.drop_all() # This will drop all tables
-        db.create_all() # This will recreate all tables with the new schema
-        print("Database tables dropped and recreated.")
+    # Fetch daily reports for the selected month across all franchisees
+    monthly_reports = DailyReport.query.filter(
+        DailyReport.report_date >= start_date,
+        DailyReport.report_date <= end_date
+    ).order_by(DailyReport.report_date.asc()).all()
 
-        # Create a default admin user if one doesn't exist
-        admin_username = 'admin'
-        admin_password = 'admin_password' # REMEMBER TO CHANGE THIS IN PRODUCTION!
+    # Group reports by franchisee for easier display
+    reports_by_franchisee = {}
+    for report in monthly_reports:
+        franchisee_name = report.franchisee.name if report.franchisee else "Unknown"
+        if franchisee_name not in reports_by_franchisee:
+            reports_by_franchisee[franchisee_name] = []
+        reports_by_franchisee[franchisee_name].append(report)
 
-        admin_user = Franchisee.query.filter_by(username=admin_username).first()
+    # Render HTML template to a string
+    rendered_html = render_template('monthly_report_pdf_template.html',
+                                    year=year,
+                                    month_name=datetime(year, month, 1).strftime('%B'),
+                                    reports_by_franchisee=reports_by_franchisee,
+                                    current_date=datetime.now().strftime("%Y-%m-%d %H:%M"))
+
+    if config is None:
+        flash("PDF generation is not configured. wkhtmltopdf not found.", "danger")
+        return redirect(url_for('admin_dashboard'))
+
+    try:
+        # Generate PDF from HTML string
+        pdf = pdfkit.from_string(rendered_html, False, configuration=config)
+
+        response = make_response(pdf)
+        response.headers['Content-Type'] = 'application/pdf'
+        response.headers['Content-Disposition'] = f'attachment; filename=monthly_report_{year}_{month:02d}.pdf'
+        return response
+    except Exception as e:
+        flash(f"Error generating PDF: {e}. Ensure wkhtmltopdf is correctly installed and configured.", "danger")
+        return redirect(url_for('admin_dashboard'))
+
+# --- Database Initialization (Run once on app startup) ---
+# Use app.app_context() for database operations
+with app.app_context():
+    inspector = inspect(db.engine) # Use sqlalchemy.inspect
+    # Check if the 'franchisee' table exists as a robust way to know if tables are created
+    if not inspector.has_table("franchisee"):
+        db.create_all()
+        current_app.logger.info("Database tables created for the first time.")
+
+        # Create default admin user only if it doesn't exist
+        admin_user = Franchisee.query.filter_by(username='admin').first()
         if not admin_user:
-            admin_user = Franchisee(
-                username=admin_username,
-                name='Headquarters Admin',
-                location='Headquarters',
-                is_admin=True
-            )
-            admin_user.set_password(admin_password) # Use the set_password method
-            db.session.add(admin_user)
+            # Use ADMIN_PASSWORD from environment variable, or a fallback (less secure)
+            admin_password = os.environ.get('ADMIN_PASSWORD', 'default_admin_password_for_initial_setup')
+            # Ensure the password is hashed correctly for the Franchisee model
+            new_admin = Franchisee(username='admin', name='Admin User', location='Headquarters', is_admin=True)
+            new_admin.set_password(admin_password) # Use the set_password method
+            db.session.add(new_admin)
             db.session.commit()
-            print(f"Default admin user '{admin_username}' created with password '{admin_password}'.")
+            current_app.logger.info("Default admin user 'admin' created.")
         else:
-            print(f"Admin user '{admin_username}' already exists.")
+            current_app.logger.info("Admin user 'admin' already exists.")
+    else:
+        current_app.logger.info("Database tables already exist.")
 
+
+# --- Main Application Run ---
+if __name__ == '__main__':
+    # This block is for local development only
     app.run(debug=True)
