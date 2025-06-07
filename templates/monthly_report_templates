@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Monthly Report - {{ month }} {{ year }}</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20mm;
+            font-size: 10pt;
+        }
+        h1, h2 {
+            color: #333;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+        .text-right {
+            text-align: right;
+        }
+        .total-section {
+            margin-top: 30px;
+            border-top: 2px solid #333;
+            padding-top: 10px;
+        }
+        .total-section h3 {
+            font-size: 16pt;
+            color: #0056b3;
+        }
+    </style>
+</head>
+<body>
+    <h1>Monthly Report</h1>
+    <h2>For {{ month }} {{ year }}</h2>
+
+    <div class="total-section">
+        <h3>Total Sales for the Month: RM {{ "%.2f"|format(total_sales_month) }}</h3>
+    </div>
+
+    <h2>Daily Reports</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Franchisee</th>
+                <th>Total Sales (RM)</th>
+                <th>Expenses (RM)</th>
+                <th>Notes</th>
+                <th>Items Sold</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for report in daily_reports %}
+            <tr>
+                <td>{{ report.report_date.strftime('%Y-%m-%d') }}</td>
+                <td>{{ report.franchisee.name }}</td>
+                <td class="text-right">{{ "%.2f"|format(report.total_sales) }}</td>
+                <td class="text-right">{{ "%.2f"|format(report.expenses) }}</td>
+                <td>{{ report.notes if report.notes else 'N/A' }}</td>
+                <td>{{ report.items_sold if report.items_sold else 'N/A' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <h2>Team Attendance</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Franchisee</th>
+                <th>Staff Name</th>
+                <th>Time In</th>
+                <th>Time Out</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for attendance in team_attendance %}
+            <tr>
+                <td>{{ attendance.attendance_date.strftime('%Y-%m-%d') }}</td>
+                <td>{{ attendance.franchisee.name }}</td>
+                <td>{{ attendance.staff_name }}</td>
+                <td>{{ attendance.time_in.strftime('%H:%M') if attendance.time_in else 'N/A' }}</td>
+                <td>{{ attendance.time_out.strftime('%H:%M') if attendance.time_out else 'N/A' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+</body>
+</html>

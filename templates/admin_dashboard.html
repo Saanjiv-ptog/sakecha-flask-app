@@ -1,0 +1,130 @@
+{% extends "base.html" %} {# Assuming you have a base.html with Bootstrap included #}
+{% block title %}Admin Dashboard{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <h1 class="mb-4">Admin Dashboard</h1>
+
+    <div class="row">
+        <div class="col-md-6">
+            <div class="card mb-4">
+                <div class="card-header bg-primary text-white">
+                    Total Sales (Current Month)
+                </div>
+                <div class="card-body">
+                    <h5 class="card-title">RM {{ "%.2f"|format(total_sales_current_month) }}</h5>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card mb-4">
+                <div class="card-header bg-info text-white">
+                    Top 5 Booths (Last 7 Days Sales)
+                </div>
+                <div class="card-body">
+                    {% if top_booths %}
+                    <ul class="list-group list-group-flush">
+                        {% for booth in top_booths %}
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            {{ booth.name }}
+                            <span class="badge bg-secondary rounded-pill">RM {{ "%.2f"|format(booth.total_sales) }}</span>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                    {% else %}
+                    <p>No sales data for the last 7 days.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <h2 class="mt-5">Daily Reports</h2>
+    <div class="table-responsive">
+        <table class="table table-striped table-hover">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Franchisee</th>
+                    <th>Date</th>
+                    <th>Total Sales</th>
+                    <th>Expenses</th>
+                    <th>Notes</th>
+                    <th>Items Sold</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for report in daily_reports %}
+                <tr>
+                    <td>{{ report.id }}</td>
+                    <td>{{ report.franchisee.name }}</td>
+                    <td>{{ report.report_date.strftime('%Y-%m-%d') }}</td>
+                    <td>RM {{ "%.2f"|format(report.total_sales) }}</td>
+                    <td>RM {{ "%.2f"|format(report.expenses) }}</td>
+                    <td>{{ report.notes if report.notes else 'N/A' }}</td>
+                    <td>{{ report.items_sold if report.items_sold else 'N/A' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <h2 class="mt-5">Ingredient Reorder Requests</h2>
+    <div class="table-responsive">
+        <table class="table table-striped table-hover">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Franchisee</th>
+                    <th>Date</th>
+                    <th>Ingredient</th>
+                    <th>Quantity</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for request in reorder_requests %}
+                <tr>
+                    <td>{{ request.id }}</td>
+                    <td>{{ request.franchisee.name }}</td>
+                    <td>{{ request.request_date.strftime('%Y-%m-%d') }}</td>
+                    <td>{{ request.ingredient_name }}</td>
+                    <td>{{ request.quantity }}</td>
+                    <td>{{ request.status }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <h2 class="mt-5">Generate Monthly Report PDF</h2>
+    <form action="{{ url_for('generate_monthly_report_pdf') }}" method="post" class="mb-4">
+        <div class="row g-3 align-items-end">
+            <div class="col-md-3">
+                <label for="month" class="form-label">Month</label>
+                <select name="month" id="month" class="form-select" required>
+                    {% for i in range(1, 13) %}
+                    <option value="{{ '%02d'|format(i) }}" {% if i == now().month %}selected{% endif %}>
+                        {{ datetime(1, i, 1).strftime('%B') }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label for="year" class="form-label">Year</label>
+                <select name="year" id="year" class="form-select" required>
+                    {% for i in range(2020, now().year + 1) %}
+                    <option value="{{ i }}" {% if i == now().year %}selected{% endif %}>{{ i }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-auto">
+                <button type="submit" class="btn btn-success">Generate PDF</button>
+            </div>
+        </div>
+    </form>
+
+
+</div>
+{% endblock %}
